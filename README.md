@@ -1,2 +1,2 @@
 # RconServer
-Fixed RCON server for PocketMine-MP
+Fixed RCON server plugin from occasionally losing connection
