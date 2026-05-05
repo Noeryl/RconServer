@@ -162,6 +162,7 @@ final class RconThread extends Thread{
                                 //FIX
                                 $ip = "unknown";
                                 @socket_getpeername($sock, $ip);
+
                                 if($payload === $this->password){
                                     $this->writePacket($sock, $requestID, 2, "");
                                     $authenticated[$id] = true;
