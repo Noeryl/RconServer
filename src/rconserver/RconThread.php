@@ -4,10 +4,11 @@ declare(strict_types = 1);
 
 namespace rconserver;
 
-use pocketmine\snooze\SleeperHandlerEntry;
-use pocketmine\thread\log\ThreadSafeLogger;
 use pocketmine\thread\Thread;
+use pocketmine\thread\log\ThreadSafeLogger;
+use pocketmine\snooze\SleeperHandlerEntry;
 use pocketmine\utils\Binary;
+use Socket;
 use function count;
 use function ltrim;
 use function microtime;
@@ -40,64 +41,16 @@ final class RconThread extends Thread{
     private bool $stop = false;
 
     public function __construct(
-        private \Socket $socket,
-        private string $password,
-        private int $maxClients,
-        private ThreadSafeLogger $logger,
-        private \Socket $ipcSocket,
-        private SleeperHandlerEntry $sleeperEntry
+        private readonly Socket $socket,
+        private readonly string $password,
+        private readonly int $maxClients,
+        private readonly ThreadSafeLogger $logger,
+        private readonly Socket $ipcSocket,
+        private readonly SleeperHandlerEntry $sleeperEntry
     ){}
 
-    private function writePacket(\Socket $client, int $requestID, int $packetType, string $payload) : void{
-        $pk = Binary::writeLInt($requestID)
-            . Binary::writeLInt($packetType)
-            . $payload
-            . "\x00\x00"; //Terminate payload and packet
-        socket_write($client, Binary::writeLInt(strlen($pk)) . $pk);
-    }
-
-    private function readPacket(\Socket $client, ?int &$requestID, ?int &$packetType, ?string &$payload) : bool{
-        $d = @socket_read($client, 4);
-
-        //FIX
-        $ip = "unknown";
-        $port = 0;
-        @socket_getpeername($client, $ip, $port);
-
-        if($d === false){
-            $err = socket_last_error($client);
-            if($err !== SOCKET_ECONNRESET){
-                $this->logger->debug("Connection error with $ip $port: " . trim(socket_strerror($err)));
-            }
-            return false;
-        }
-        if(strlen($d) !== 4){
-            if($d !== ""){ //empty data is returned on disconnection
-                $this->logger->debug("Truncated packet from $ip $port (want 4 bytes, have " . strlen($d) . "), disconnecting");
-            }
-            return false;
-        }
-        $size = Binary::readLInt($d);
-        if($size < 0 or $size > 65535){
-            $this->logger->debug("Packet with too-large length header $size from $ip $port, disconnecting");
-            return false;
-        }
-        $buf = @socket_read($client, $size);
-        if($buf === false){
-            $err = socket_last_error($client);
-            if($err !== SOCKET_ECONNRESET){
-                $this->logger->debug("Connection error with $ip $port: " . trim(socket_strerror($err)));
-            }
-            return false;
-        }
-        if(strlen($buf) !== $size){
-            $this->logger->debug("Truncated packet from $ip $port (want $size bytes, have " . strlen($buf) . "), disconnecting");
-            return false;
-        }
-        $requestID = Binary::readLInt(substr($buf, 0, 4));
-        $packetType = Binary::readLInt(substr($buf, 4, 4));
-        $payload = substr($buf, 8, -2); //Strip two null bytes
-        return true;
+    public function getThreadName() : string{
+        return "RCON";
     }
 
     public function close() : void{
@@ -105,25 +58,21 @@ final class RconThread extends Thread{
     }
 
     protected function onRun() : void{
-        /** @var \Socket[] $clients */
+        /** @var Socket[] $clients */
         $clients = [];
         /** @var bool[] $authenticated */
         $authenticated = [];
         /** @var float[] $timeouts */
         $timeouts = [];
-
-        /** @var int $nextClientId */
         $nextClientId = 0;
-
         $notifier = $this->sleeperEntry->createNotifier();
 
         while(!$this->stop){
             $r = $clients;
-            $r["main"] = $this->socket; //this is ugly, but we need to be able to mass-select()
+            $r["main"] = $this->socket;
             $r["ipc"] = $this->ipcSocket;
             $w = null;
             $e = null;
-
             $disconnect = [];
 
             if(socket_select($r, $w, $e, 5) > 0){
@@ -132,7 +81,7 @@ final class RconThread extends Thread{
                         if(($client = socket_accept($this->socket)) !== false){
                             if(count($clients) >= $this->maxClients){
                                 @socket_close($client);
-                            }else{
+                            } else {
                                 socket_set_nonblock($client);
                                 socket_set_option($client, SOL_SOCKET, SO_KEEPALIVE, 1);
 
@@ -142,10 +91,9 @@ final class RconThread extends Thread{
                                 $timeouts[$id] = microtime(true) + 5;
                             }
                         }
-                    }elseif($sock === $this->ipcSocket){
-                        //read dummy data
+                    } elseif($sock === $this->ipcSocket){
                         socket_read($sock, 65535);
-                    }else{
+                    } else {
                         $p = $this->readPacket($sock, $requestID, $packetType, $payload);
                         if($p === false){
                             $disconnect[$id] = $sock;
@@ -153,7 +101,7 @@ final class RconThread extends Thread{
                         }
 
                         switch($packetType){
-                            case 3: //Login
+                            case 3:
                                 if($authenticated[$id]){
                                     $disconnect[$id] = $sock;
                                     break;
@@ -166,16 +114,17 @@ final class RconThread extends Thread{
                                 if($payload === $this->password){
                                     $this->writePacket($sock, $requestID, 2, "");
                                     $authenticated[$id] = true;
-                                }else{
+                                } else {
                                     $disconnect[$id] = $sock;
                                     $this->writePacket($sock, -1, 2, "");
                                 }
                                 break;
-                            case 2: //Command
+                            case 2:
                                 if(!$authenticated[$id]){
                                     $disconnect[$id] = $sock;
                                     break;
                                 }
+
                                 if($payload !== ""){
                                     $this->cmd = ltrim($payload);
                                     $this->synchronized(function() use ($notifier) : void{
@@ -193,7 +142,7 @@ final class RconThread extends Thread{
             }
 
             foreach($authenticated as $id => $status){
-                if(!isset($disconnect[$id]) and !$authenticated[$id] and $timeouts[$id] < microtime(true)){ //Timeout
+                if(!isset($disconnect[$id]) && !$status && $timeouts[$id] < microtime(true)){
                     $disconnect[$id] = $clients[$id];
                 }
             }
@@ -209,7 +158,62 @@ final class RconThread extends Thread{
         }
     }
 
-    private function disconnectClient(\Socket $client) : void{
+    private function writePacket(Socket $client, int $requestID, int $packetType, string $payload) : void{
+        $pk = Binary::writeLInt($requestID)
+            . Binary::writeLInt($packetType)
+            . $payload
+            . "\x00\x00";
+        socket_write($client, Binary::writeLInt(strlen($pk)) . $pk);
+    }
+
+    private function readPacket(Socket $client, ?int &$requestID, ?int &$packetType, ?string &$payload) : bool{
+        $d = @socket_read($client, 4);
+
+        //FIX
+        $ip = "unknown";
+        $port = 0;
+        @socket_getpeername($client, $ip, $port);
+
+        if($d === false){
+            $err = socket_last_error($client);
+            if($err !== SOCKET_ECONNRESET){
+                $this->logger->debug("Connection error with $ip $port: " . trim(socket_strerror($err)));
+            }
+            return false;
+        }
+        if(strlen($d) !== 4){
+            if($d !== ""){
+                $this->logger->debug("Truncated packet from $ip $port (want 4 bytes, have " . strlen($d) . "), disconnecting");
+            }
+            return false;
+        }
+
+        $size = Binary::readLInt($d);
+        if($size < 0 || $size > 65535){
+            $this->logger->debug("Packet with too-large length header $size from $ip $port, disconnecting");
+            return false;
+        }
+
+        $buf = @socket_read($client, $size);
+        if($buf === false){
+            $err = socket_last_error($client);
+            if($err !== SOCKET_ECONNRESET){
+                $this->logger->debug("Connection error with $ip $port: " . trim(socket_strerror($err)));
+            }
+            return false;
+        }
+        if(strlen($buf) !== $size){
+            $this->logger->debug("Truncated packet from $ip $port (want $size bytes, have " . strlen($buf) . "), disconnecting");
+            return false;
+        }
+
+        $requestID = Binary::readLInt(substr($buf, 0, 4));
+        $packetType = Binary::readLInt(substr($buf, 4, 4));
+        $payload = substr($buf, 8, -2);
+        return true;
+    }
+
+    private function disconnectClient(Socket $client) : void{
         //FIX
         $ip = "unknown";
         @socket_getpeername($client, $ip);
@@ -219,9 +223,5 @@ final class RconThread extends Thread{
         @socket_set_block($client);
         @socket_read($client, 1);
         @socket_close($client);
-    }
-
-    public function getThreadName() : string{
-        return "RCON";
     }
 }

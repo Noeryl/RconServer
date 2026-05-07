@@ -12,6 +12,10 @@ final class RconCommandSender extends ConsoleCommandSender{
 
     private string $messages = "";
 
+    public function getName() : string{
+        return "RCON";
+    }
+
     public function sendMessage(Translatable|string $message) : void{
         if($message instanceof Translatable){
             $message = $this->getServer()->getLanguage()->translate($message);
@@ -22,9 +26,5 @@ final class RconCommandSender extends ConsoleCommandSender{
 
     public function getMessage() : string{
         return $this->messages;
-    }
-
-    public function getName() : string{
-        return "Rcon";
     }
 }
